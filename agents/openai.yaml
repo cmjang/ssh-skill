@@ -1,0 +1,11 @@
+interface:
+  display_name: "SSH Skill"
+  short_description: "登记服务器、同步代码、远程看代码，支持 OpenCode/Claude/Gemini/Cursor、uv、conda 和集群 profile"
+  default_prompt: "Use $ssh-skill to register and manage my SSH servers, sync local code to remote hosts, inspect code, detect and run remote AI coding CLIs such as OpenCode, Claude Code, Gemini CLI, or Cursor Agent, configure remote environments with uv or conda, submit Slurm training jobs, and apply reusable cluster or AI tool profiles."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "ssh"
+      description: "ssh-skill runtime exposing command execution, file transfer, server registry, remote file inspection, remote AI coding CLI detection, and cluster-aware helper tools"
+policy:
+  allow_implicit_invocation: true

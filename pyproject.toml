@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ssh-skill"
+version = "0.2.0"
+description = "A Python-first Codex skill runtime for SSH hosts, remote coding CLIs, and optional Slurm workflows."
+requires-python = ">=3.10"
+
+[project.scripts]
+ssh-skill-server = "ssh_skill.server:main"
+ssh-skill-registry = "ssh_skill.registry:main"
+
+[tool.setuptools]
+package-dir = {"" = "scripts"}
+
+[tool.setuptools.packages.find]
+where = ["scripts"]
