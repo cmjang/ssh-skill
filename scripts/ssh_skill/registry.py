@@ -66,6 +66,7 @@ def _default_server_record(alias: str) -> dict[str, Any]:
         "cluster_mode": False,
         "scheduler": None,
         "cluster_profile": None,
+        "role": None,
         "notes": None,
         "created_at": _now(),
         "updated_at": _now(),
@@ -109,6 +110,8 @@ def _render_config(data: dict[str, Any]) -> str:
             lines.append(f"  # cluster_mode: true ({scheduler})")
         if server.get("cluster_profile"):
             lines.append(f"  # cluster_profile: {server['cluster_profile']}")
+        if server.get("role"):
+            lines.append(f"  # role: {server['role']}")
         tags = server.get("tags") or []
         if tags:
             lines.append(f"  # tags: {', '.join(tags)}")
@@ -123,7 +126,8 @@ def _normalize_cluster_profile(cluster_profile: str | None) -> tuple[str | None,
     if not value:
         return None, None
     profile = get_cluster_profile(value)["profile"]
-    return value, profile
+    # Store the canonical profile id even when the user passed an alias such as "skd".
+    return str(profile.get("id") or value), profile
 
 
 def _cluster_profile_updates(
@@ -135,10 +139,12 @@ def _cluster_profile_updates(
     normalized_profile, profile = _normalize_cluster_profile(cluster_profile)
     updates: dict[str, Any] = {}
     if normalized_profile:
-        if cluster_mode is False:
-            raise ValueError("cluster_profile cannot be set while cluster_mode is false")
+        # A cluster_profile can be bound regardless of cluster_mode. cluster_mode only marks whether
+        # a host is treated as a primary scheduler/submission host; debug or compute nodes can still
+        # carry the profile for software, policy, and topology context.
         updates["cluster_profile"] = normalized_profile
-        updates["cluster_mode"] = True if cluster_mode is not False else False
+        if cluster_mode is not None:
+            updates["cluster_mode"] = cluster_mode
         if not scheduler and profile and profile.get("scheduler"):
             updates["scheduler"] = profile["scheduler"]
     elif cluster_mode is not None:
@@ -225,6 +231,7 @@ def add_server(
     cluster_mode: bool = False,
     scheduler: str | None = None,
     cluster_profile: str | None = None,
+    role: str | None = None,
     notes: str | None = None,
 ) -> dict[str, Any]:
     data = _load_registry()
@@ -248,6 +255,7 @@ def add_server(
             "tags": _normalize_tags(tags),
             "default_workdir": default_workdir,
             "shell": shell or "/bin/bash",
+            "role": role,
             "notes": notes,
             "created_at": _now(),
             "updated_at": _now(),
@@ -331,6 +339,7 @@ def import_alias(
     cluster_mode: bool = False,
     scheduler: str | None = None,
     cluster_profile: str | None = None,
+    role: str | None = None,
     description: str | None = None,
     tags: list[str] | None = None,
     notes: str | None = None,
@@ -356,11 +365,125 @@ def import_alias(
         cluster_mode=cluster_mode,
         scheduler=scheduler,
         cluster_profile=cluster_profile,
+        role=role,
         notes=notes,
     )
     if existing is None:
         return add_server(alias=alias, **payload)
     return update_server(alias, **payload)
+
+
+def provision_cluster(
+    profile: str,
+    *,
+    user: str,
+    identity_file: str | None = None,
+    prefix: str | None = None,
+    login_jump_index: int | None = None,
+    debug_port: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Register all login and debug hosts for a jump-host cluster profile.
+
+    Login nodes become direct, Slurm-capable submit hosts. Debug nodes are wired with a
+    ProxyJump through a login node (because they are only reachable that way) and marked as
+    role=debug so the runtime refuses to submit Slurm jobs from them.
+    """
+    payload = get_cluster_profile(profile)
+    prof = payload["profile"]
+    profile_id = str(prof.get("id") or profile)
+    access = prof.get("access") or {}
+    login_nodes = [str(node) for node in (access.get("login_nodes") or []) if str(node).strip()]
+    debug_nodes = [str(node) for node in (access.get("debug_nodes") or []) if str(node).strip()]
+    if not login_nodes:
+        raise ValueError(
+            f"cluster profile {profile_id} has no access.login_nodes; cannot provision login/debug hosts"
+        )
+
+    login_port = int(access.get("ssh_port") or 22)
+    resolved_debug_port = int(debug_port) if debug_port else login_port
+    jump_index = login_jump_index if login_jump_index is not None else int(access.get("default_login_jump_index") or 0)
+    if jump_index < 0 or jump_index >= len(login_nodes):
+        raise ValueError(f"login_jump_index out of range (0..{len(login_nodes) - 1}): {jump_index}")
+    requires_jump = bool(access.get("debug_requires_login_jump", True))
+    alias_prefix = (prefix or prof.get("host_alias_prefix") or profile_id).strip().strip("-")
+    display_name = prof.get("display_name") or profile_id
+
+    login_aliases = [f"{alias_prefix}-login{index}" for index in range(1, len(login_nodes) + 1)]
+    jump_alias = login_aliases[jump_index]
+
+    plan: list[dict[str, Any]] = []
+    for alias, host in zip(login_aliases, login_nodes):
+        plan.append(
+            {
+                "alias": alias,
+                "host": host,
+                "port": login_port,
+                "role": "login",
+                "cluster_mode": True,
+                "proxy_jump": None,
+                "tags": ["login", profile_id],
+                "description": f"{display_name} login node",
+            }
+        )
+    for index, host in enumerate(debug_nodes, start=1):
+        alias = f"{alias_prefix}-debug{index}"
+        proxy_jump = jump_alias if requires_jump else None
+        description = f"{display_name} GPU debug node"
+        if proxy_jump:
+            description += f" (jump via {jump_alias})"
+        plan.append(
+            {
+                "alias": alias,
+                "host": host,
+                "port": resolved_debug_port,
+                "role": "debug",
+                "cluster_mode": False,
+                "proxy_jump": proxy_jump,
+                "tags": ["debug", profile_id],
+                "description": description,
+            }
+        )
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "profile": profile_id,
+            "user": user,
+            "jump_alias": jump_alias,
+            "planned_servers": plan,
+        }
+
+    results: list[dict[str, Any]] = []
+    for record in plan:
+        common = dict(
+            host=record["host"],
+            user=user,
+            port=record["port"],
+            identity_file=identity_file,
+            proxy_jump=record["proxy_jump"],
+            description=record["description"],
+            tags=record["tags"],
+            cluster_mode=record["cluster_mode"],
+            scheduler="slurm",
+            cluster_profile=profile_id,
+            role=record["role"],
+        )
+        if get_server_record(record["alias"]) is None:
+            outcome = add_server(alias=record["alias"], **common)
+        else:
+            outcome = update_server(record["alias"], **common)
+        results.append(outcome["server"])
+
+    render_managed_ssh_config()
+    return {
+        "profile": profile_id,
+        "user": user,
+        "jump_alias": jump_alias,
+        "login_aliases": login_aliases,
+        "servers": results,
+        "managed_ssh_config_path": str(managed_ssh_config_path()),
+    }
 
 
 def _print(payload: dict[str, Any]) -> None:
@@ -392,6 +515,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--cluster-mode", action="store_true")
     add_parser.add_argument("--scheduler")
     add_parser.add_argument("--cluster-profile")
+    add_parser.add_argument("--role")
     add_parser.add_argument("--notes")
 
     update_parser = sub.add_parser("update")
@@ -410,6 +534,7 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument("--scheduler")
     update_parser.add_argument("--cluster-profile")
     update_parser.add_argument("--clear-cluster-profile", action="store_true")
+    update_parser.add_argument("--role")
     update_parser.add_argument("--notes")
 
     remove_parser = sub.add_parser("remove")
@@ -420,9 +545,26 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--cluster-mode", action="store_true")
     import_parser.add_argument("--scheduler")
     import_parser.add_argument("--cluster-profile")
+    import_parser.add_argument("--role")
     import_parser.add_argument("--description")
     import_parser.add_argument("--tags", nargs="*")
     import_parser.add_argument("--notes")
+
+    provision_parser = sub.add_parser(
+        "provision-cluster",
+        help="Register all login and debug hosts for a jump-host cluster profile (e.g. sist_ai_cluster / skd).",
+    )
+    provision_parser.add_argument("profile", help="cluster profile id or alias, e.g. sist_ai_cluster or skd")
+    provision_parser.add_argument("--user", required=True, help="your cluster account username")
+    provision_parser.add_argument("--identity-file", help="private key path used for all hosts")
+    provision_parser.add_argument("--prefix", help="alias prefix override (default from the profile, e.g. sist)")
+    provision_parser.add_argument(
+        "--login-jump-index",
+        type=int,
+        help="which login node (0-based) debug nodes jump through; default from the profile",
+    )
+    provision_parser.add_argument("--debug-port", type=int, help="SSH port for debug nodes if it differs from the login port")
+    provision_parser.add_argument("--dry-run", action="store_true", help="print the planned hosts without writing the registry")
 
     sub.add_parser("render")
     return parser
@@ -457,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
                     cluster_mode=args.cluster_mode,
                     scheduler=args.scheduler,
                     cluster_profile=args.cluster_profile,
+                    role=args.role,
                     notes=args.notes,
                 )
             )
@@ -483,6 +626,7 @@ def main(argv: list[str] | None = None) -> int:
                     scheduler=args.scheduler,
                     cluster_profile=args.cluster_profile,
                     clear_cluster_profile=args.clear_cluster_profile,
+                    role=args.role,
                     notes=args.notes,
                 )
             )
@@ -497,9 +641,23 @@ def main(argv: list[str] | None = None) -> int:
                     cluster_mode=args.cluster_mode,
                     scheduler=args.scheduler,
                     cluster_profile=args.cluster_profile,
+                    role=args.role,
                     description=args.description,
                     tags=args.tags,
                     notes=args.notes,
+                )
+            )
+            return 0
+        if args.command == "provision-cluster":
+            _print(
+                provision_cluster(
+                    args.profile,
+                    user=args.user,
+                    identity_file=args.identity_file,
+                    prefix=args.prefix,
+                    login_jump_index=args.login_jump_index,
+                    debug_port=args.debug_port,
+                    dry_run=args.dry_run,
                 )
             )
             return 0

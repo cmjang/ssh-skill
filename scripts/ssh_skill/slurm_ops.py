@@ -20,11 +20,26 @@ from .ssh_ops import (
 SBATCH_JOB_ID_PATTERN = re.compile(r"(?P<job_id>\d+)")
 
 
+NON_SUBMIT_ROLES = {"debug", "compute"}
+
+
 def _ensure_slurm_host(host: str) -> dict[str, Any]:
     payload = get_cluster_profile_for_host(host=host)
     profile = payload.get("profile")
     if not profile or profile.get("scheduler") != "slurm":
         raise SSHError(f"managed host is not configured as a Slurm cluster: {host}")
+    return payload
+
+
+def _ensure_submit_host(host: str) -> dict[str, Any]:
+    payload = _ensure_slurm_host(host)
+    server = payload.get("server") or {}
+    role = str(server.get("role") or "").strip().lower()
+    if role in NON_SUBMIT_ROLES:
+        raise SSHError(
+            f"host '{host}' has role={role}; submitting or canceling Slurm jobs from {role} nodes is not allowed. "
+            f"Submit from a login node instead (a managed host with role=login, e.g. <prefix>-login1)."
+        )
     return payload
 
 
@@ -430,7 +445,7 @@ def submit_batch(
     test_only: bool = False,
     timeout_sec: int = 120,
 ) -> dict[str, Any]:
-    profile_payload = _ensure_slurm_host(host)
+    profile_payload = _ensure_submit_host(host)
     if bool(script_path) == bool(script_content):
         raise SSHError("set exactly one of script_path or script_content")
     if additional_args and any(not isinstance(item, str) for item in additional_args):
@@ -500,7 +515,7 @@ def cancel_job(
     signal: str | None = None,
     allow_cancel: bool = False,
 ) -> dict[str, Any]:
-    profile_payload = _ensure_slurm_host(host)
+    profile_payload = _ensure_submit_host(host)
     if not allow_cancel:
         raise SSHError(
             "job cancellation is blocked by default. Set allow_cancel=true only when the user explicitly requested cancellation."

@@ -52,7 +52,7 @@ Use `ssh_inspect_ai_workspace` to see which of these are present or missing.
 Add custom JSON files under:
 
 ```text
-~/.codex/ssh-skill/ai_tool_profiles/
+$SSH_SKILL_HOME/ai_tool_profiles/
 ```
 
 Each file should contain a single JSON object. The important fields are:

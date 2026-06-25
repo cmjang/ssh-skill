@@ -2,6 +2,8 @@
 
 This file is intentionally sanitized for public release. Keep institution-specific hostnames, internal URLs, ports, storage roots, and queue policies in a private local note instead of committing them to the repository.
 
+One concrete cluster ships in this repo as a worked example: the ShanghaiTech SIST / 上科大 (`skd`) AI Cluster, documented in [sist-ai-cluster.md](sist-ai-cluster.md) and exposed as the built-in `sist_ai_cluster` profile. Its addresses are campus-private and only routable inside the ShanghaiTech network. Use it as a template; for a different site, prefer a private profile under `~/.codex/ssh-skill/cluster_profiles/` rather than committing real internal hosts.
+
 ## What to keep private
 
 - Internal documentation URLs

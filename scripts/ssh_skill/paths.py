@@ -4,12 +4,38 @@ import os
 from pathlib import Path
 
 
-def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+def agent_config_home() -> Path | None:
+    """Locate the host agent's config dir so state lives next to it.
+
+    Supports Codex (CODEX_HOME / ~/.codex) and Claude Code (CLAUDE_CONFIG_DIR / ~/.claude).
+    Returns None if neither is configured, so the caller can fall back to a default.
+    """
+    codex = os.environ.get("CODEX_HOME")
+    if codex:
+        return Path(codex).expanduser()
+    claude = os.environ.get("CLAUDE_CONFIG_DIR")
+    if claude:
+        return Path(claude).expanduser()
+    for candidate in ("~/.codex", "~/.claude"):
+        path = Path(candidate).expanduser()
+        if path.exists():
+            return path
+    return None
 
 
 def state_home() -> Path:
-    return codex_home() / "ssh-skill"
+    """Per-user ssh-skill state directory.
+
+    Precedence: SSH_SKILL_HOME (explicit, agent-agnostic) -> the host agent's config dir
+    (Codex or Claude Code) + /ssh-skill -> ~/.codex/ssh-skill as a last-resort default.
+    """
+    explicit = os.environ.get("SSH_SKILL_HOME")
+    if explicit:
+        return Path(explicit).expanduser()
+    base = agent_config_home()
+    if base is not None:
+        return base / "ssh-skill"
+    return Path("~/.codex").expanduser() / "ssh-skill"
 
 
 def registry_path() -> Path:

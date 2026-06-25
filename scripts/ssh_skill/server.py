@@ -154,7 +154,7 @@ class SSHSkillServer:
             "ssh_get_ai_tool_profile": (
                 {
                     "name": "ssh_get_ai_tool_profile",
-                    "description": "Resolve an AI coding tool profile by id or alias, including custom JSON-defined profiles under ~/.codex/ssh-skill/ai_tool_profiles.",
+                    "description": "Resolve an AI coding tool profile by id or alias, including custom JSON-defined profiles under the skill's ai_tool_profiles state directory.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
